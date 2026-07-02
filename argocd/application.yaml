@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: example-app
+  namespace: example-ns
+  labels:
+    name: example-app
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/your-org/example-repo-deploy-with-argocd.git
+    targetRevision: main
+    path: openshift
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: example-ns
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - Refresh=hard
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10

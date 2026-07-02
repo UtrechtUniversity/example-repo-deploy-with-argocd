@@ -1,0 +1,116 @@
+name: "Cleanup Old Harbor Images"
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Docker Image to Harbor"]
+    types:
+      - completed
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PY_COLOR: "1"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Check out repository"
+        uses: actions/checkout@v4
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: "Install dependencies"
+        run: pip install requests
+
+      - name: "Cleanup old images from Harbor"
+        env:
+          HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
+          HARBOR_PROJECT: ${{ vars.HARBOR_PROJECT }}
+          HARBOR_IMAGE_NAME: ${{ vars.HARBOR_IMAGE_NAME }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python - <<'EOF'
+          import os
+          import re
+          import requests
+
+          registry = os.environ['HARBOR_REGISTRY']
+          project = os.environ['HARBOR_PROJECT']
+          image = os.environ['HARBOR_IMAGE_NAME']
+          username = os.environ['HARBOR_USERNAME']
+          password = os.environ['HARBOR_PASSWORD']
+
+          # Read the current image version from deployment.yaml
+          with open("openshift/deployment.yaml") as f:
+              content = f.read()
+          match = re.search(rf"{re.escape(registry)}/{re.escape(project)}/{re.escape(image)}:(\S+)", content)
+          if not match:
+              print("Could not determine current image version from deployment.yaml")
+              exit(1)
+          current_version = match.group(1)
+          keep_tags = {"latest", current_version}
+          print(f"Keeping tags: {keep_tags}")
+
+          api_url = f"https://{registry}/api/v2.0"
+          auth = (username, password)
+
+          # Fetch all artifacts with pagination
+          artifacts = []
+          page = 1
+          while True:
+              resp = requests.get(
+                  f"{api_url}/projects/{project}/repositories/{image}/artifacts",
+                  auth=auth, verify=False,
+                  params={"page": page, "page_size": 100}
+              )
+              if resp.status_code != 200:
+                  print(f"Failed to get artifacts: {resp.status_code}")
+                  exit(1)
+              batch = resp.json()
+              if not batch:
+                  break
+              artifacts.extend(batch)
+              page += 1
+
+          from datetime import datetime
+          sorted_artifacts = sorted(
+              artifacts,
+              key=lambda x: datetime.fromisoformat(x['push_time'].replace('Z', '+00:00')),
+              reverse=True
+          )
+
+          # Always keep latest + current version tag; also keep the 10 most recent by push time
+          keep_digests = {a['digest'] for a in sorted_artifacts[:10]}
+
+          deleted_count = 0
+          for artifact in artifacts:
+              tags = [tag['name'] for tag in (artifact.get('tags') or [])]
+              if artifact['digest'] in keep_digests or any(t in keep_tags for t in tags):
+                  print(f"✅ Keeping (tags: {', '.join(tags) or 'untagged'})")
+                  continue
+              print(f"🗑️  Deleting (tags: {', '.join(tags) or 'untagged'})")
+              delete_url = f"{api_url}/projects/{project}/repositories/{image}/artifacts/{artifact['digest']}"
+              delete_resp = requests.delete(delete_url, auth=auth, verify=False)
+              if delete_resp.status_code == 200:
+                  deleted_count += 1
+                  print(f"  ✅ Deleted")
+              else:
+                  print(f"  ❌ Failed: {delete_resp.status_code}")
+
+          print(f"\n{'='*50}")
+          print(f"Cleanup complete: {deleted_count} artifact(s) deleted")
+          print(f"{'='*50}")
+          EOF
