@@ -6,7 +6,8 @@ on:
     types:
       - completed
   schedule:
-    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+    # uncomment for production
+    #- cron: '0 2 * * *'  # Daily at 2 AM UTC
   workflow_dispatch:
 
 permissions:
